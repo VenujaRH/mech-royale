@@ -321,6 +321,11 @@ class Bot:
         self.dodge_vec = (0.0, 0.0)
         self.crate_focus = None
         self.plan_budget_ok = True
+        self.mem = {}            # enemy id -> (pos, vel, t_seen, hp_frac)
+        self.recover = False
+        self.recover_t = -99.0
+        self.cover = None
+        self.cover_t = -99.0
 
     # ---------------------------------------------------------- helpers
     def zone_live(self, z, t):
@@ -373,6 +378,48 @@ class Bot:
             if u in ids:
                 return ids.index(u)
         return 0
+
+    # ---------------------------------------------------------- cover
+    def hidden_from(self, p, threats, step=2.4):
+        """True if a mech standing at p (x, y) is out of every threat's line of fire."""
+        w = self.world
+        tgt = (p[0], p[1], w.ground(p[0], p[1]) + 4.5)
+        for e in threats:
+            ep = e[0]
+            eye = (ep[0], ep[1], ep[2] + 7.5)
+            if w.los(eye, tgt, skip_start=2.0, skip_end=3.0, step=step):
+                return False
+        return True
+
+    def find_cover(self, pos, threats, zone, t, deadline):
+        w = self.world
+        tx = sum(e[0][0] for e in threats) / len(threats)
+        ty = sum(e[0][1] for e in threats) / len(threats)
+        away = math.atan2(pos[1] - ty, pos[0] - tx)
+        best = None
+        for r in (14.0, 26.0, 40.0, 58.0):
+            for k in range(12):
+                if time.perf_counter() > deadline:
+                    return best[1] if best else None
+                a = away + (k - 5.5) * (math.pi / 7.5)
+                c = (pos[0] + math.cos(a) * r, pos[1] + math.sin(a) * r)
+                if w.blocked(*c) or not self.safe_point_ok(c, zone, t + r / 11.0, margin=10):
+                    continue
+                if not self.hidden_from(c, threats):
+                    continue
+                dmin = min(d2(c, e[0]) for e in threats)
+                if dmin < 35:
+                    continue
+                # prefer short runs that do not head toward the threats
+                toward = math.cos(wrap(a - away))
+                sc = r * 1.0 - toward * 12 - min(dmin, 120) * 0.15
+                if not w.walk_clear(pos, c):
+                    sc += 18
+                if best is None or sc < best[0]:
+                    best = (sc, c)
+            if best is not None and best[0] < r:
+                break
+        return best[1] if best else None
 
     # ---------------------------------------------------------- navigation
     def steer_to(self, pos, goal, t, me_z):
@@ -514,9 +561,72 @@ class Bot:
         aim = None
         face_target = None
 
+        # ---- enemy memory and threat level
+        for m in enemies:
+            self.mem[m["id"]] = (m["pos"], m["vel"], t, m.get("hp", 1400) / max(1, m.get("max_hp", 1400)))
+        for k in [k for k, v in self.mem.items() if t - v[2] > 9.0]:
+            del self.mem[k]
+        threats = []
+        for k, (p, v, ts, eh) in self.mem.items():
+            age = min(t - ts, 2.0)
+            threats.append(((p[0] + v[0] * age, p[1] + v[1] * age, p[2]), eh, k, t - ts))
+        threat_score = 0.0
+        n_close = 0
+        for e in threats:
+            dd = d2(e[0], pos)
+            threat_score += (0.5 + e[1]) / (1 + (dd / 60.0) ** 2)
+            if dd < 130:
+                n_close += 1
+        weakest_enemy = min((e[1] for e in threats if d2(e[0], pos) < 160), default=1.0)
+
+        # ---- recover mode (hide behind a building and regenerate), with hysteresis
+        hold_fire = False
+        if not self.recover:
+            if threats and (hpf < 0.42 or n_close >= 3 or (n_close >= 2 and hpf < 0.7)
+                            or (hpf < 0.55 and weakest_enemy > hpf + 0.3)):
+                self.recover = True
+                self.recover_t = t
+                self.cover = None
+        else:
+            if (hpf > 0.86 and n_close <= 1) or not threats and hpf > 0.7 or (t - self.recover_t > 35 and hpf > 0.6):
+                self.recover = False
+                self.cover = None
+
         # ---- combat
         sec = weapons[1]["kind"] if weapons[1] else None
-        if target is not None:
+        close_vis = [m for m in enemies if math.dist(m["pos"], pos) < 32]
+        if self.recover and not zone_urgent and threats and not (close_vis and hpf > 0.15 and len(close_vis) == 1 and target is not None and tvis and tdist < 32):
+            mode = "recover"
+            near = [e for e in threats if d2(e[0], pos) < 220] or threats
+            exposed = not self.hidden_from(pos, near, step=3.0)
+            if self.cover is None or t - self.cover_t > (0.6 if exposed else 2.5) or (exposed and d2(self.cover, pos) < 5):
+                if self.plan_budget_ok:
+                    c = self.find_cover(pos, near, zone, t, t0 + 0.022)
+                    self.cover_t = t
+                    if c is not None:
+                        self.cover = c
+            if self.cover is not None and (exposed or d2(self.cover, pos) > 3):
+                move = self.steer_to(pos, self.cover, t, z)
+                boost = energy > 18 and exposed
+            elif self.cover is None:
+                # nowhere to hide: run directly away from the threats, toward the zone
+                ax = sum(e[0][0] for e in near) / len(near); ay = sum(e[0][1] for e in near) / len(near)
+                vx, vy = x - ax, y - ay
+                L = math.hypot(vx, vy) or 1.0
+                vx, vy = vx / L, vy / L
+                zx, zy = nc[0] - x, nc[1] - y
+                zl = math.hypot(zx, zy) or 1.0
+                vx += zx / zl * 0.7; vy += zy / zl * 0.7
+                L = math.hypot(vx, vy) or 1.0
+                move = (vx / L, vy / L)
+                boost = energy > 18
+            else:
+                move = (0.0, 0.0)
+            # keep the front armor toward the nearest threat; shoot back only if cornered
+            ne = min(near, key=lambda e: d2(e[0], pos))
+            face_target = target if target is not None else {"pos": ne[0], "vel": [0, 0, 0], "kind": "mech"}
+            hold_fire = not (target is not None and tvis and tdist < 60 and exposed)
+        elif target is not None:
             mode = "fight"
             mh = target.get("hp", 1400) / max(1, target.get("max_hp", 1400))
             n_threat = sum(1 for m in enemies if math.dist(m["pos"], pos) < 160)
@@ -581,7 +691,7 @@ class Bot:
                     if pick_goal is None or dd < pick_goal[0]:
                         pick_goal = (dd, p)
             npc_goal = None
-            if hpf > 0.6:
+            if hpf > 0.6 and not threats:
                 for m in npcs:
                     dd = math.dist(m["pos"], pos)
                     if dd < 110 and (npc_goal is None or dd < npc_goal[0]):
@@ -787,6 +897,11 @@ class Bot:
             if li is not None and (weapons[li].get("charge") or 0) > 0:
                 fire[li] = False
 
+        if hold_fire:
+            li = held.get("laser")
+            fire = [False, False]
+            if li is not None and (weapons[li].get("charge") or 0) > 0:
+                fire[li] = True  # keep a charge held rather than wasting it
         act["move"] = [round(move[0], 3), round(move[1], 3)]
         act["boost"] = bool(boost)
         act["jump"] = bool(jump)
