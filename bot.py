@@ -648,9 +648,6 @@ class Bot:
                 want = 90.0
             else:
                 want = 45.0
-            nvis = sum(1 for m in enemies if math.dist(m["pos"], pos) < 200)
-            if nvis >= 2:
-                want = max(want, 85.0)
             tp = target["pos"]
             dx, dy = tp[0] - x, tp[1] - y
             L = math.hypot(dx, dy) or 1.0
@@ -843,10 +840,10 @@ class Bot:
             boost = True
         # fly: in a fight, hop and jet in short bursts so hunters' shots (aimed at where we were) pass under us
         if mode == "fight" and target is not None and tdist > 25:
-            ph = (t + self.scan_phase) % 1.6
-            if ph < 0.1 and me["grounded"] and energy > 55:
+            ph = (t + self.scan_phase) % 1.2
+            if ph < 0.1 and me["grounded"] and energy > 40:
                 jump = True
-            if not me["grounded"] and energy > 30 and ph < 0.6:
+            if not me["grounded"] and energy > 20 and ph < 0.8:
                 boost = True
 
         # ---- aiming and firing
