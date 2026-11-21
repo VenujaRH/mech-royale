@@ -287,8 +287,8 @@ class World:
 
 # ---------------------------------------------------------------- bot
 UPGRADE_PRIORITY = [
-    "gun_rate", "armor", "gun_damage", "plating", "lightning_efficiency", "laser_charge", "laser_damage",
-    "nanites", "gyros", "gun_mag", "gun_velocity", "servos", "lightning_range", "jets", "capacitor",
+    "servos", "jets", "gun_rate", "armor", "gun_damage", "plating", "lightning_efficiency", "laser_charge",
+    "laser_damage", "nanites", "gyros", "gun_mag", "gun_velocity", "lightning_range", "capacitor",
     "reactor", "lightning_chain", "sensors", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce",
 ]
 WEAPON_RANK = {"lightning": 3, "laser": 3, "mortar": 1, "gun": 2}
@@ -687,7 +687,7 @@ class Bot:
                 mvx, mvy = mvx * 0.5 + lx * 1.5, mvy * 0.5 + ly * 1.5
             ml = math.hypot(mvx, mvy) or 1.0
             move = (mvx / ml, mvy / ml)
-            boost = energy > 35 and (L < 140 or retreat or zone_urgent)
+            boost = (energy > 35 and (L < 140 or retreat or zone_urgent)) or energy > 60
             face_target = target
         else:
             # ---- non-combat goals
@@ -798,14 +798,14 @@ class Bot:
                 cy = pp[1] + pv[1] * tc - y
                 cz = pp[2] + pv[2] * tc - (z + 4.5)
                 miss = math.sqrt(cx * cx + cy * cy + cz * cz)
-                rad = 9.0 if pr["kind"] == "mortar" else 3.5
+                rad = 10.0 if pr["kind"] == "mortar" else 4.5
                 if miss < rad:
                     hv = math.hypot(pv[0], pv[1]) or 1
                     sx, sy = -pv[1] / hv, pv[0] / hv
                     if sx * cx + sy * cy > 0:
                         sx, sy = -sx, -sy
                     self.dodge_vec = (sx, sy)
-                    self.dodge_until = t + 0.35
+                    self.dodge_until = t + 0.45
                     break
         if t < self.dodge_until and move is not None:
             mvx = move[0] * 0.4 + self.dodge_vec[0]
@@ -840,7 +840,7 @@ class Bot:
             boost = True
         # fly: in a fight, hop and jet in short bursts so hunters' shots (aimed at where we were) pass under us
         if mode == "fight" and target is not None and tdist > 25:
-            ph = (t + self.scan_phase) % 2.2
+            ph = (t + self.scan_phase) % 1.6
             if ph < 0.1 and me["grounded"] and energy > 55:
                 jump = True
             if not me["grounded"] and energy > 30 and ph < 0.6:
