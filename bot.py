@@ -103,29 +103,7 @@ def build_nav(map_dir):
                 wblock[k] = 1
     LC = 2.0
     lgx, lgy, lb, lt = raster(LC)
-    roofs = []
-    for p in w["prisms"]:
-        if p.get("kind") != "building":
-            continue
-        r = p["ring"]; n = len(r) // 2
-        if n < 3:
-            continue
-        area = 0.0
-        for i in range(n):
-            j = (i + 1) % n
-            area += r[2 * i] * r[2 * j + 1] - r[2 * j] * r[2 * i + 1]
-        area = abs(area) / 2
-        if area < 180:
-            continue
-        cx = sum(r[0::2]) / n; cy = sum(r[1::2]) / n
-        if not _pip(cx, cy, r) or any(_pip(cx, cy, h) for h in (p.get("holes") or []) if h):
-            continue
-        g = ground(cx, cy)
-        hgt = p["top"] - g
-        if 6 <= hgt <= 42 and p["base"] <= g + 2.5:
-            roofs.append((cx, cy, p["top"], math.sqrt(area / math.pi), r, g))
     return {
-        "roofs": roofs,
         "minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy,
         "walk": {"cell": WC, "gx": wgx, "gy": wgy, "ground": wground, "block": wblock},
         "los": {"cell": LC, "gx": lgx, "gy": lgy, "cells": {k: (lb[k], lt[k]) for k in lb}, "raw": True},
@@ -147,7 +125,6 @@ class World:
             nav = json.loads(zlib.decompress(open(os.path.join(HERE, "navmap.bin"), "rb").read()))
         self.minx, self.miny = nav["minx"], nav["miny"]
         self.maxx, self.maxy = nav["maxx"], nav["maxy"]
-        self.roofs = nav.get("roofs", [])
         wk = nav["walk"]
         self.wc, self.wgx, self.wgy = wk["cell"], wk["gx"], wk["gy"]
         self.wground = wk["ground"]
@@ -346,9 +323,6 @@ class Bot:
         self.plan_budget_ok = True
         self.mem = {}            # enemy id -> (pos, vel, t_seen, hp_frac)
         self.vsm = {}            # enemy id -> smoothed velocity (strafers jitter)
-        self.roof = None
-        self.roof_pick_t = -99.0
-        self.climb_t = 0.0
         self.recover = False
         self.recover_t = -99.0
         self.cover = None
@@ -447,32 +421,6 @@ class Bot:
             if best is not None and best[0] < r:
                 break
         return best[1] if best else None
-
-    # ---------------------------------------------------------- high ground
-    def on_roof(self, pos, roof):
-        return roof is not None and pos[2] > roof[2] - 1.6 and _pip(pos[0], pos[1], roof[4])
-
-    def pick_roof(self, pos, zone, t, energy_cap):
-        nc, nr = zone["next_center"], zone["next_radius"]
-        best = None
-        for rf in self.world.roofs:
-            hgt = rf[2] - rf[5]
-            if hgt * 1.7 + 12 > energy_cap:
-                continue
-            if d2((rf[0], rf[1]), nc) > nr - max(20.0, rf[3] + 10):
-                continue
-            dd = d2((rf[0], rf[1]), pos)
-            if dd > 320:
-                continue
-            sc = dd + abs(hgt - 16) * 2.0 - min(rf[3], 30) * 1.5
-            if best is None or sc < best[0]:
-                best = (sc, rf)
-        return best[1] if best else None
-
-    def roof_inside(self, p, roof, margin=3.0):
-        if not _pip(p[0], p[1], roof[4]):
-            return False
-        return d2(p, (roof[0], roof[1])) < roof[3] * 1.2 - margin or _pip(p[0] + margin, p[1], roof[4]) and _pip(p[0] - margin, p[1], roof[4]) and _pip(p[0], p[1] + margin, roof[4]) and _pip(p[0], p[1] - margin, roof[4])
 
     # ---------------------------------------------------------- navigation
     def steer_to(self, pos, goal, t, me_z):
@@ -583,7 +531,7 @@ class Bot:
             dd = math.dist(m["pos"], pos)
             mh = m.get("hp", 1400) / max(1, m.get("max_hp", 1400))
             vis = self.world.los(muzzle, (m["pos"][0], m["pos"][1], m["pos"][2] + 4.5))
-            sc = dd + mh * 70 + (0 if vis else 90) - (40 if m["id"] == self.last_attacker else 0) - (50 if m.get("charging") and vis else 0)
+            sc = dd + mh * 70 + (0 if vis else 90) - (40 if m["id"] == self.last_attacker else 0)
             if best is None or sc < best[0]:
                 best = (sc, m, dd, vis)
         target = best[1] if best else None
@@ -613,37 +561,6 @@ class Bot:
         boost = False
         aim = None
         face_target = None
-        climb_jump = False
-        climb_boost = False
-        no_avoid = False
-
-        # ---- high ground: pick a roof inside the next zone and hold it
-        if self.roof is not None and d2((self.roof[0], self.roof[1]), nc) > nr - max(12.0, self.roof[3] * 0.6):
-            self.roof = None
-        if self.roof is None and t > 18 and t - self.roof_pick_t > 2.0:
-            self.roof_pick_t = t
-            self.roof = self.pick_roof(pos, zone, t, me["max_energy"])
-        roof = self.roof
-        on_roof = self.on_roof(pos, roof)
-        roof_active = False
-
-        def climb(target_threat=None):
-            """Move onto the roof: path to its foot, then jump and jet over the edge."""
-            nonlocal climb_jump, climb_boost, no_avoid
-            rc = (roof[0], roof[1])
-            dd = d2(pos, rc)
-            need = (roof[2] - z) * 1.7 + 6
-            if dd > roof[3] + 14:
-                return self.steer_to(pos, rc, t, z)
-            no_avoid = True
-            ux, uy = (rc[0] - x) / max(dd, 1e-3), (rc[1] - y) / max(dd, 1e-3)
-            if z < roof[2] - 0.4:
-                if energy < need and me["grounded"]:
-                    return (0.0, 0.0)  # wait at the wall for energy
-                if me["grounded"]:
-                    climb_jump = True
-                climb_boost = energy > 2
-            return (ux, uy)
 
         # ---- enemy memory and threat level
         for m in enemies:
@@ -722,7 +639,7 @@ class Bot:
             mode = "fight"
             mh = target.get("hp", 1400) / max(1, target.get("max_hp", 1400))
             n_threat = sum(1 for m in enemies if math.dist(m["pos"], pos) < 160)
-            retreat = (hpf < 0.32 and mh > hpf - 0.05) or (n_threat >= 3 and hpf < 0.6)
+            retreat = False
             if sec == "lightning" and energy > 25:
                 want = 30.0
             elif sec == "laser":
@@ -730,9 +647,7 @@ class Bot:
             elif sec == "mortar":
                 want = 90.0
             else:
-                want = 60.0
-            if hpf < 0.5:
-                want += 30
+                want = 45.0
             tp = target["pos"]
             dx, dy = tp[0] - x, tp[1] - y
             L = math.hypot(dx, dy) or 1.0
@@ -749,56 +664,13 @@ class Bot:
                 if not tvis:
                     radial = max(radial, 0.6) if hpf > 0.45 else radial
             mvx, mvy = ux * radial + px * 0.9, uy * radial + py * 0.9
-            if roof_active and on_roof:
-                # hold the roof: strafe only along it, never step off to chase
-                no_avoid = True
-                ok = None
-                for sd in (self.strafe_dir, -self.strafe_dir):
-                    qx, qy = -uy * sd, ux * sd
-                    if self.roof_inside((x + qx * 5, y + qy * 5), roof):
-                        ok = (qx, qy); self.strafe_dir = sd
-                        break
-                if ok is None:
-                    rc = (roof[0], roof[1]); dd = d2(pos, rc) or 1.0
-                    ok = ((rc[0] - x) / dd, (rc[1] - y) / dd)
-                mvx, mvy = ok
-                if retreat:
-                    rc = (roof[0], roof[1]); dd = d2(pos, rc) or 1.0
-                    mvx, mvy = (rc[0] - x) / dd, (rc[1] - y) / dd
-            elif len(enemies) >= 2 and not (roof_active and d2(pos, (roof[0], roof[1])) < roof[3] + 14):
-                # several hunters: pick the step that keeps them all in front of us and away from flanks
-                fy = math.atan2(dy, dx)
-                bestc = None
-                for k in range(12):
-                    a = k * (TAU / 12)
-                    nx2, ny2 = x + math.cos(a) * 8, y + math.sin(a) * 8
-                    if self.world.blocked(nx2, ny2):
-                        continue
-                    c = 0.0
-                    for m in enemies:
-                        mp = m["pos"]
-                        dm = math.hypot(mp[0] - nx2, mp[1] - ny2)
-                        c += 1.0 / (1.0 + (dm / 50.0) ** 2)
-                        bz = math.atan2(mp[1] - ny2, mp[0] - nx2)
-                        if abs(wrap(bz - fy)) > 1.4:
-                            c += 0.8  # would hit our rear armour
-                        if not self.world.los((mp[0], mp[1], mp[2] + 7), (nx2, ny2, z + 4.5), step=3.0):
-                            c -= 0.5  # building between us
-                    c -= 0.3 * math.cos(a - math.atan2(mvy, mvx))
-                    if bestc is None or c < bestc[0]:
-                        bestc = (c, a)
-                if bestc is not None:
-                    mvx, mvy = math.cos(bestc[1]), math.sin(bestc[1])
-            elif roof_active and d2(pos, (roof[0], roof[1])) < roof[3] + 14 and not retreat:
-                cm = climb(target)
-                mvx, mvy = cm[0], cm[1]
-            if zone_goal is not None and not (roof_active and on_roof):
+            if zone_goal is not None:
                 gx, gy = self.steer_to(pos, zone_goal, t, z)
                 wgt = 1.6 if zone_urgent else 0.8
                 mvx += gx * wgt; mvy += gy * wgt
             ml = math.hypot(mvx, mvy) or 1.0
             move = (mvx / ml, mvy / ml)
-            boost = energy > 35 and (L < 140 or retreat or zone_urgent) and not (roof_active and on_roof)
+            boost = energy > 35 and (L < 140 or retreat or zone_urgent)
             face_target = target
         else:
             # ---- non-combat goals
@@ -826,17 +698,16 @@ class Bot:
                 if dd < 130 and abs(p["pos"][2] - self.world.ground(p["pos"][0], p["pos"][1])) < 3 and self.safe_point_ok(p["pos"], zone, t + dd / speed):
                     if pick_goal is None or dd < pick_goal[0]:
                         pick_goal = (dd, p)
-            farming = me["cubes"] < 5 and t < 140
             npc_goal = None
-            if hpf > 0.5:
+            if hpf > 0.6:
                 for m in npcs:
                     dd = math.dist(m["pos"], pos)
-                    if dd < (170 if farming else 110) and self.safe_point_ok(m["pos"], zone, t + dd / speed) and (npc_goal is None or dd < npc_goal[0]):
+                    if dd < 110 and (npc_goal is None or dd < npc_goal[0]):
                         npc_goal = (dd, m)
             crate_goal = None
             for c in obs.get("crates", []):
                 dd = math.dist(c["pos"], pos)
-                if dd < (120 if farming else 75) and abs(c["pos"][2] - self.world.ground(c["pos"][0], c["pos"][1])) < 3 and (crate_goal is None or dd < crate_goal[0]):
+                if dd < 75 and abs(c["pos"][2] - self.world.ground(c["pos"][0], c["pos"][1])) < 3 and (crate_goal is None or dd < crate_goal[0]):
                     crate_goal = (dd, c)
 
             if zone_urgent and zone_goal is not None:
@@ -848,17 +719,6 @@ class Bot:
                 boost = energy > 40 and drop_goal[0] > 20
             elif pick_goal is not None:
                 mode, goal = "pickup", (pick_goal[1]["pos"][0], pick_goal[1]["pos"][1])
-            elif cube_goal is not None and cube_goal[0] < 45 and not on_roof:
-                mode, goal = "cube", (cube_goal[1]["pos"][0], cube_goal[1]["pos"][1])
-            elif roof_active and not (farming and (cube_goal or npc_goal or crate_goal)):
-                if on_roof:
-                    mode = "perch"
-                    no_avoid = True
-                    rc = (roof[0], roof[1]); dd = d2(pos, rc)
-                    move = (0.0, 0.0) if dd < max(3.0, roof[3] * 0.3) else ((rc[0] - x) / dd * 0.5, (rc[1] - y) / dd * 0.5)
-                else:
-                    mode = "climb"
-                    move = climb()
             elif cube_goal is not None:
                 mode, goal = "cube", (cube_goal[1]["pos"][0], cube_goal[1]["pos"][1])
             elif zone_goal is not None:
@@ -939,8 +799,7 @@ class Bot:
 
         if move is None:
             move = (0.0, 0.0)
-        if not no_avoid:
-            move = self.avoid(pos, move)
+        move = self.avoid(pos, move)
 
         # ---- stuck handling: jump and jet over obstacles
         hs = math.hypot(me["vel"][0], me["vel"][1])
@@ -962,13 +821,6 @@ class Bot:
                 self.stuck_t = 0.0
         if not me["grounded"] and self.stuck_t > 0.2 and energy > 8:
             boost = True
-        if climb_jump:
-            jump = True
-        if climb_boost:
-            boost = True
-        if no_avoid and mode in ("perch",) or (roof_active and on_roof and mode == "fight"):
-            jump = False
-            self.stuck_t = 0.0
 
         # ---- aiming and firing
         fire = [False, False]
