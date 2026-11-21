@@ -838,6 +838,13 @@ class Bot:
                 self.stuck_t = 0.0
         if not me["grounded"] and self.stuck_t > 0.2 and energy > 8:
             boost = True
+        # fly: in a fight, hop and jet in short bursts so hunters' shots (aimed at where we were) pass under us
+        if mode == "fight" and target is not None and tdist > 25:
+            ph = (t + self.scan_phase) % 1.6
+            if ph < 0.1 and me["grounded"] and energy > 55:
+                jump = True
+            if not me["grounded"] and energy > 30 and ph < 0.6:
+                boost = True
 
         # ---- aiming and firing
         fire = [False, False]
