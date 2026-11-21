@@ -232,7 +232,7 @@ class World:
                 return best[1], best[2]
         return i0, j0
 
-    def astar(self, start, goal, limit=3500):
+    def astar(self, start, goal, limit=2800):
         gx = self.wgx
         si, sj = self.nearest_free(*start)
         ti, tj = self.nearest_free(*goal)
@@ -582,13 +582,12 @@ class Bot:
         # ---- recover mode (hide behind a building and regenerate), with hysteresis
         hold_fire = False
         if not self.recover:
-            if threats and (hpf < 0.42 or n_close >= 3 or (n_close >= 2 and hpf < 0.7)
-                            or (hpf < 0.55 and weakest_enemy > hpf + 0.3)):
+            if threats and ((hpf < 0.25 and weakest_enemy > hpf + 0.15) or (n_close >= 3 and hpf < 0.4)):
                 self.recover = True
                 self.recover_t = t
                 self.cover = None
         else:
-            if (hpf > 0.86 and n_close <= 1) or not threats and hpf > 0.7 or (t - self.recover_t > 35 and hpf > 0.6):
+            if (hpf > 0.6 and n_close <= 1) or (not threats and hpf > 0.45) or (t - self.recover_t > 20 and hpf > 0.4):
                 self.recover = False
                 self.cover = None
 
@@ -601,7 +600,8 @@ class Bot:
             exposed = not self.hidden_from(pos, near, step=3.0)
             if self.cover is None or t - self.cover_t > (0.6 if exposed else 2.5) or (exposed and d2(self.cover, pos) < 5):
                 if self.plan_budget_ok:
-                    c = self.find_cover(pos, near, zone, t, t0 + 0.022)
+                    c = self.find_cover(pos, near, zone, t, t0 + 0.015)
+                    self.plan_budget_ok = False
                     self.cover_t = t
                     if c is not None:
                         self.cover = c
@@ -626,6 +626,11 @@ class Bot:
             ne = min(near, key=lambda e: d2(e[0], pos))
             face_target = target if target is not None else {"pos": ne[0], "vel": [0, 0, 0], "kind": "mech"}
             hold_fire = not (target is not None and tvis and tdist < 60 and exposed)
+            gi = held.get("gun")
+            if hold_fire and gi is not None:
+                gw = weapons[gi]
+                if gw.get("ammo", 12) < gw["stats"].get("mag", 12) and not gw.get("reload"):
+                    act["reload"] = True
         elif target is not None:
             mode = "fight"
             mh = target.get("hp", 1400) / max(1, target.get("max_hp", 1400))
@@ -670,7 +675,8 @@ class Bot:
             drop_goal = None
             for dr in obs.get("drops", []):
                 dd = d2(dr["pos"], pos)
-                if dd < 220 and (dr["holder"] in (None, me["id"])) and self.safe_point_ok(dr["pos"], zone, t + dd / speed):
+                risky = any(d2(e[0], dr["pos"]) < 110 for e in threats)
+                if dd < 220 and not risky and (dr["holder"] in (None, me["id"])) and self.safe_point_ok(dr["pos"], zone, t + dd / speed):
                     eta = dd / speed
                     if dr["lands_in"] < eta + 8:
                         if drop_goal is None or dd < drop_goal[0]:
