@@ -287,8 +287,8 @@ class World:
 
 # ---------------------------------------------------------------- bot
 UPGRADE_PRIORITY = [
-    "gun_rate", "armor", "gun_damage", "plating", "lightning_efficiency", "laser_charge", "laser_damage",
-    "nanites", "gyros", "gun_mag", "gun_velocity", "servos", "lightning_range", "jets", "capacitor",
+    "servos", "gun_rate", "armor", "jets", "gun_damage", "plating", "lightning_efficiency", "laser_charge",
+    "laser_damage", "nanites", "gyros", "gun_mag", "gun_velocity", "lightning_range", "capacitor",
     "reactor", "lightning_chain", "sensors", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce",
 ]
 WEAPON_RANK = {"lightning": 3, "laser": 3, "mortar": 1, "gun": 2}
@@ -838,12 +838,21 @@ class Bot:
                 self.stuck_t = 0.0
         if not me["grounded"] and self.stuck_t > 0.2 and energy > 8:
             boost = True
+        # jumpers: react to incoming attacks with a jump-jet so the shot passes under us
+        threat_now = t < self.dodge_until
+        for m in enemies:
+            if m.get("charging") and abs(wrap(m["aim"][0] - math.atan2(y - m["pos"][1], x - m["pos"][0]))) < 0.08:
+                threat_now = True
+        if threat_now and me["grounded"] and energy > 25:
+            jump = True
+        if threat_now and not me["grounded"] and energy > 15:
+            boost = True
         # fly: in a fight, hop and jet in short bursts so hunters' shots (aimed at where we were) pass under us
         if mode == "fight" and target is not None and tdist > 25:
-            ph = (t + self.scan_phase) % 1.2
-            if ph < 0.1 and me["grounded"] and energy > 40:
+            ph = (t + self.scan_phase) % 1.6
+            if ph < 0.1 and me["grounded"] and energy > 55:
                 jump = True
-            if not me["grounded"] and energy > 20 and ph < 0.8:
+            if not me["grounded"] and energy > 30 and ph < 0.6:
                 boost = True
 
         # ---- aiming and firing
