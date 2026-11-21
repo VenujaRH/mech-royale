@@ -287,8 +287,8 @@ class World:
 
 # ---------------------------------------------------------------- bot
 UPGRADE_PRIORITY = [
-    "armor", "plating", "nanites", "gun_rate", "gun_damage", "lightning_efficiency", "laser_charge",
-    "laser_damage", "gyros", "gun_mag", "gun_velocity", "servos", "lightning_range", "jets", "capacitor",
+    "gun_rate", "armor", "gun_damage", "plating", "lightning_efficiency", "laser_charge", "laser_damage",
+    "nanites", "gyros", "gun_mag", "gun_velocity", "servos", "lightning_range", "jets", "capacitor",
     "reactor", "lightning_chain", "sensors", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce",
 ]
 WEAPON_RANK = {"lightning": 3, "laser": 3, "mortar": 1, "gun": 2}
@@ -322,6 +322,7 @@ class Bot:
         self.crate_focus = None
         self.plan_budget_ok = True
         self.mem = {}            # enemy id -> (pos, vel, t_seen, hp_frac)
+        self.vsm = {}            # enemy id -> smoothed velocity (strafers jitter)
         self.recover = False
         self.recover_t = -99.0
         self.cover = None
@@ -564,6 +565,9 @@ class Bot:
         # ---- enemy memory and threat level
         for m in enemies:
             self.mem[m["id"]] = (m["pos"], m["vel"], t, m.get("hp", 1400) / max(1, m.get("max_hp", 1400)))
+            sv = self.vsm.get(m["id"])
+            v = m["vel"]
+            self.vsm[m["id"]] = list(v) if sv is None else [sv[i] * 0.6 + v[i] * 0.4 for i in range(3)]
         for k in [k for k, v in self.mem.items() if t - v[2] > 9.0]:
             del self.mem[k]
         threats = []
@@ -582,7 +586,7 @@ class Bot:
         # ---- recover mode (hide behind a building and regenerate), with hysteresis
         hold_fire = False
         if not self.recover:
-            if threats and ((hpf < 0.25 and weakest_enemy > hpf + 0.15) or (n_close >= 3 and hpf < 0.4)):
+            if False:
                 self.recover = True
                 self.recover_t = t
                 self.cover = None
@@ -675,7 +679,7 @@ class Bot:
             drop_goal = None
             for dr in obs.get("drops", []):
                 dd = d2(dr["pos"], pos)
-                risky = any(d2(e[0], dr["pos"]) < 110 for e in threats)
+                risky = False
                 if dd < 220 and not risky and (dr["holder"] in (None, me["id"])) and self.safe_point_ok(dr["pos"], zone, t + dd / speed):
                     eta = dd / speed
                     if dr["lands_in"] < eta + 8:
@@ -697,7 +701,7 @@ class Bot:
                     if pick_goal is None or dd < pick_goal[0]:
                         pick_goal = (dd, p)
             npc_goal = None
-            if hpf > 0.6 and not threats:
+            if hpf > 0.6:
                 for m in npcs:
                     dd = math.dist(m["pos"], pos)
                     if dd < 110 and (npc_goal is None or dd < npc_goal[0]):
@@ -827,7 +831,10 @@ class Bot:
             kind = face_target.get("kind", "mech")
             zoff = 4.5 if kind == "mech" else (1.75 if kind == "npc" else 1.2)
             gstats = weapons[0]["stats"] if weapons[0] else cfg["weapons"]["gun"]
-            want, aimpt, hdist = self.lead(muzzle, tp, face_target.get("vel", [0, 0, 0]), gstats.get("speed", 252), zoff)
+            lv = face_target.get("vel", [0, 0, 0])
+            if kind == "mech" and face_target.get("id") in self.vsm:
+                lv = self.vsm[face_target["id"]]
+            want, aimpt, hdist = self.lead(muzzle, tp, lv, gstats.get("speed", 252), zoff)
             clear = self.world.los(muzzle, aimpt)
             dist3 = math.dist(muzzle, aimpt)
             use_mortar = False
@@ -849,8 +856,8 @@ class Bot:
             if not use_mortar:
                 aim = want
                 ey, ep = self.aim_err(me["aim"], want)
-                rad = 2.2 if kind == "mech" else (1.5 if kind == "npc" else 1.1)
-                tol = math.atan2(rad, max(dist3, 1.0)) + 0.012
+                rad = 2.6 if kind == "mech" else (1.6 if kind == "npc" else 1.2)
+                tol = math.atan2(rad, max(dist3, 1.0)) + 0.02
                 aligned = ey < tol and ep < tol + 0.02
                 gi = held.get("gun")
                 if gi is not None and clear and dist3 < weapons[gi]["stats"].get("range", 230) * 0.97 and aligned:
