@@ -648,6 +648,9 @@ class Bot:
                 want = 90.0
             else:
                 want = 45.0
+            nvis = sum(1 for m in enemies if math.dist(m["pos"], pos) < 200)
+            if nvis >= 2:
+                want = max(want, 85.0)
             tp = target["pos"]
             dx, dy = tp[0] - x, tp[1] - y
             L = math.hypot(dx, dy) or 1.0
