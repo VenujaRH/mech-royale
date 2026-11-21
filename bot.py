@@ -291,7 +291,7 @@ UPGRADE_PRIORITY = [
     "nanites", "gyros", "gun_mag", "gun_velocity", "servos", "lightning_range", "jets", "capacitor",
     "reactor", "lightning_chain", "sensors", "mortar_reload", "mortar_velocity", "mortar_splash", "laser_pierce",
 ]
-WEAPON_RANK = {"laser": 4, "lightning": 2, "mortar": 1, "gun": 2}
+WEAPON_RANK = {"lightning": 3, "laser": 3, "mortar": 1, "gun": 2}
 
 
 class Bot:
@@ -668,9 +668,26 @@ class Bot:
                 gx, gy = self.steer_to(pos, zone_goal, t, z)
                 wgt = 1.6 if zone_urgent else 0.8
                 mvx += gx * wgt; mvy += gy * wgt
+            # snowball: grab nearby cubes / better weapons mid-fight (kills drop all their cubes + 2)
+            loot = None
+            for c in obs.get("cubes", []):
+                dc = d2(c["pos"], pos)
+                if dc < 28 and abs(c["pos"][2] - z) < 4 and (loot is None or dc < loot[0]):
+                    loot = (dc, c["pos"])
+            for p in obs.get("pickups", []):
+                if p["kind"] in held:
+                    continue
+                if weapons[1] is not None and WEAPON_RANK.get(p["kind"], 0) < WEAPON_RANK.get(weapons[1]["kind"], 0) + 2:
+                    continue
+                dc = d2(p["pos"], pos)
+                if dc < 22 and abs(p["pos"][2] - z) < 4 and (loot is None or dc < loot[0]):
+                    loot = (dc, p["pos"])
+            if loot is not None:
+                lx, ly = (loot[1][0] - x) / max(loot[0], 0.5), (loot[1][1] - y) / max(loot[0], 0.5)
+                mvx, mvy = mvx * 0.5 + lx * 1.5, mvy * 0.5 + ly * 1.5
             ml = math.hypot(mvx, mvy) or 1.0
             move = (mvx / ml, mvy / ml)
-            boost = energy > 35 and (L < 140 or retreat or zone_urgent or (L > 100 and "laser" not in held))
+            boost = energy > 35 and (L < 140 or retreat or zone_urgent)
             face_target = target
         else:
             # ---- non-combat goals
@@ -695,7 +712,7 @@ class Bot:
                 if weapons[1] is not None and WEAPON_RANK.get(p["kind"], 0) < WEAPON_RANK.get(weapons[1]["kind"], 0) + 2:
                     continue
                 dd = d2(p["pos"], pos)
-                if dd < (220 if "laser" not in held else 130) and abs(p["pos"][2] - self.world.ground(p["pos"][0], p["pos"][1])) < 3 and self.safe_point_ok(p["pos"], zone, t + dd / speed):
+                if dd < 130 and abs(p["pos"][2] - self.world.ground(p["pos"][0], p["pos"][1])) < 3 and self.safe_point_ok(p["pos"], zone, t + dd / speed):
                     if pick_goal is None or dd < pick_goal[0]:
                         pick_goal = (dd, p)
             npc_goal = None
@@ -767,33 +784,6 @@ class Bot:
                         move = (move[0] * 0.5, move[1] * 0.5)
                 if mode == "roam" and t > 40:
                     move = (move[0] * 0.4, move[1] * 0.4)  # walk slowly: silent
-
-        # ---- laser telegraph: an enemy charging at us -> step behind cover if one is close
-        for m in enemies:
-            if not m.get("charging"):
-                continue
-            dd = d2(m["pos"], pos)
-            if dd < 35:
-                continue
-            brg = math.atan2(y - m["pos"][1], x - m["pos"][0])
-            if abs(wrap(m["aim"][0] - brg)) > 0.08:
-                continue
-            best_c = None
-            for k in range(8):
-                a = k * (TAU / 8)
-                for r in (5.0, 9.0):
-                    c = (x + math.cos(a) * r, y + math.sin(a) * r)
-                    if self.world.blocked(*c):
-                        continue
-                    if self.hidden_from(c, [(m["pos"],)]):
-                        if best_c is None or r < best_c[0]:
-                            best_c = (r, a)
-                        break
-            if best_c is not None:
-                move = (math.cos(best_c[1]), math.sin(best_c[1]))
-                boost = energy > 10
-                self.dodge_until = 0.0
-            break
 
         # ---- projectile dodge
         for pr in obs.get("projectiles", []):
